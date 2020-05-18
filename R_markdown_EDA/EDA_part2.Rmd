@@ -1,0 +1,187 @@
+---
+title: "Untitled"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Geographical
+-Geographical distribution of visits(country/city)
+```{r}
+b <- map_data("world")
+x2 <- x%>%
+  count(country,sort=TRUE)
+library(dplyr)
+x2$country[x2$country=="United States"] <- "USA"
+x2$country[x2$country=="United Kingdom"] <- "UK"
+
+x_country <- b %>%
+  left_join(., x2, by=c("region"="country"))
+filter(x_country,region == "United State")
+
+ggplot(x_country,mapping=aes(x=long,y=lat,group=group,fill=n)) +
+geom_polygon(colour="white") +
+  scale_fill_gradient(low = 'orange', high = 'red',name = "Visits") +
+  labs(title ="Visits in different countries") +  
+  theme(axis.title = element_blank(), axis.text = element_blank(), 
+        axis.ticks = element_blank(), panel.grid = element_blank())
+
+
+
+
+x3 <- filter(x, country=="United States")
+x4 <- x3%>%
+  count(city, sort=TRUE)
+
+d <- read.csv("uscitiesv1.4.csv")
+
+x_city <- d %>%
+  left_join(., x4, by="city")
+x_city_1 <- filter(x_city, x_city$n!="NA")
+
+x_city_2 <- data.frame(city=c("Mountain View","New York","San Francisco","Sunnyvale","San Jose","Los Angeles","Chicago","Seattle","Austin","Santa Clara","Salem","Cambridge","Ann Arbor"), lat=c(37.4001,40.6943,37.7561,37.3846,37.3020,34.1140,41.8373,47.6217,30.3038,37.3646,42.5130,42.3758,37.4001), lng=c(-122.0796,-73.9249,-122.4429,-122.0261,-121.8488,-118.4068,-87.6861,-122.3238,-97.7545,-121.9679,-70.9021,-71.1184,-122.0796),n=c(40659,26228,20206,13008,10210,8637,7430,5002,3782,3162,2224,1582,40659))
+
+x_city_2 %>%
+  ggplot(aes(lng, lat, size=n, color=n))+
+  borders("state")+
+  geom_point()+
+  coord_quickmap()
+```
+-Geographical distribution of the browser and device
+-Geographical distribution of pageview and hits
+```{r}
+x %>%
+  group_by(continent, browser) %>% 
+  summarise(total = n()) %>% 
+  top_n(5) %>% 
+  ungroup() %>% 
+  arrange(continent, desc(total)) %>%
+  filter(continent != "NA") %>% 
+  ggplot(aes(x = reorder(browser,-total), y = total)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~continent) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  xlab("Continent") +
+  ylab("Number of browser")
+  
+x %>%
+  group_by(continent, deviceCategory) %>% 
+  summarise(total = n()) %>% 
+  arrange(desc(total)) %>% 
+  filter(continent != "NA") %>% 
+  ggplot(aes(x = reorder(deviceCategory, -total), y = total)) + 
+  geom_bar(stat = "identity") + 
+  facet_grid(~continent) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  xlab("Continent") +
+  ylab("Number of Device Category")
+
+x %>%
+  group_by(continent) %>% 
+  mutate(pageviews = as.numeric(pageviews)) %>% 
+  filter(pageviews != "NA", continent != "NA") %>% 
+  summarise(total = sum(pageviews)) %>% 
+  ggplot(aes(x = reorder(continent, -total), y = total)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Page Views")
+
+x %>%
+  group_by(continent) %>% 
+  mutate(hits = as.numeric(hits)) %>% 
+  filter(hits != "NA", continent != "NA") %>% 
+  summarise(total = sum(hits)) %>% 
+  ggplot(aes(x = reorder(continent, -total), y = total)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Hits")
+```
+
+3.2.6 Source Features 
+The most frequent channel Grouping/device/browser
+```{r}
+ggplot(data=x,aes(reorder(channelGrouping,rep(1,length(channelGrouping)),sum)))+geom_bar()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+ labs(x="channelGrouping", y = "visits")
+
+ggplot(data=x,aes(reorder(deviceCategory,rep(1,length(deviceCategory)),sum)))+geom_bar()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+ labs(x="deviceCategory", y = "visits")
+
+x %>%
+  count(browser, sort=TRUE) %>% 
+  top_n(5) %>%
+  mutate(browser=reorder(browser, n)) %>%
+  ggplot(aes(x=browser, y=n)) + 
+  geom_col()+ labs(y = "visits")
+```
+We can see the most frequent channels are Organic Search and Social. Desktop and mobile are two most frequent devices. The Chrome and Safari are the most two popular browsers. 
+
+Which channel Grouping/device/browser contributes to the revenue most
+```{r}
+x_y %>%
+  group_by(channelGrouping) %>%
+  summarize(total_revenue = sum(y)) %>%
+  mutate(channelGrouping=reorder(channelGrouping, total_revenue)) %>%
+  ggplot(aes(channelGrouping, log(total_revenue))) +
+  geom_bar(stat = "identity")
+
+x_y %>%
+  group_by(deviceCategory) %>%
+  summarize(total_revenue = sum(y)) %>%
+  mutate(deviceCategory=reorder(deviceCategory, total_revenue)) %>%
+  ggplot(aes(deviceCategory, log(total_revenue))) +
+  geom_bar(stat = "identity")
+
+x_y %>%
+  group_by(browser) %>%
+  summarize(total_revenue = sum(y)) %>%
+  top_n(5) %>%
+  mutate(browser=reorder(browser, log(total_revenue))) %>%
+  ggplot(aes(x=browser, y=total_revenue)) +
+  geom_bar(stat = "identity")
+```
+We see that Direct and Referral are the two channels that contribute to the total revenue most, not the Organic Search and Social which are the two most popular ones. Desktop and mobile are two devices that contribute to the revenue most. Users from Chrome produce the highest total revenue. And Safari contributes less than Firefox even though it is more popular than it. 
+
+User
+```{r}
+x %>% 
+  bind_cols(as_tibble(y)) %>% 
+  group_by(fullVisitorId)%>%
+  summarise(y=mean(value)) %>%
+  ggplot(aes(x = 1:length(fullVisitorId), y)) +
+  geom_point(alpha=0.4, size=0.8) +
+  theme_minimal() +
+  scale_y_continuous(name="revenue") + 
+  scale_x_continuous(name="index") +
+  theme(legend.position="none")
+
+x %>% 
+  group_by(fullVisitorId)%>%
+  summarise(y=sum(as.numeric(pageviews))) %>%
+  ggplot(aes(x = 1:length(fullVisitorId), y)) +
+  geom_point(alpha=0.4, size=0.8) +
+  theme_minimal() +
+  scale_y_continuous(name="pageviews") + 
+  scale_x_continuous(name="index") +
+  theme(legend.position="none")
+
+x %>% 
+  group_by(fullVisitorId)%>%
+  summarise(y=sum(as.numeric(hits))) %>%
+  ggplot(aes(x = 1:length(fullVisitorId), y)) +
+  geom_point(alpha=0.4, size=0.8) +
+  theme_minimal() +
+  scale_y_continuous(name="hits") + 
+  scale_x_continuous(name="index") +
+  theme(legend.position="none")
+
+x_y %>% 
+  group_by(fullVisitorId) %>%
+  dplyr::summarise(pageview = sum(as.numeric(pageviews)), revenue = sum(y)) %>%
+  ggplot(aes(pageview, log(revenue))) +
+  geom_point()
+
+
+```
+

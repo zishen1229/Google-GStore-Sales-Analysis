@@ -1,0 +1,564 @@
+---
+title: "DS5110-project"
+author: "Zishen Li"
+date: "2018/10/28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# 1.Introduction
+
+fullvisitorId should be string to be unique in the data set
+
+# 2.Enviorment
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(jsonlite)
+library(tidyr)
+library(lubridate)
+library(maps)
+```
+
+# 3.Tidy data and data exploration
+
+## 3.1 Import and tidy the data
+
+Here we only import the train set since the test set of the competition does not provide the total revenue, which is our prediction target. Therefore, we choose to work on the training set and partition it into train, validation and test set.
+
+```{r}
+train <- read.csv("train.csv", na = NA)
+
+dim(train)
+sapply(train, class)
+train[1,]
+```
+
+The data set has 12 variables and 903,653 observations. There are 4 columns with JSON format. Moreover, as mentioned in the introduction, we change the data type of fullvisitorId to character as well.
+
+```{r}
+library(jsonlite)
+
+# Build a function to tidy the data set
+
+tidy <- function(data,data_o){
+  for (i in 1:4){
+  first <- str_c(data[,i], collapse = ",")
+  second <- str_c("[", first, "]")
+  data_o <- cbind(data_o,fromJSON(second, flatten = TRUE))
+  }
+  data_o$fullVisitorId <- as.character(data_o$fullVisitorId)
+  return(select(data_o, -device, -geoNetwork, -trafficSource, -totals))
+}
+
+train_tidy <- tidy(train[,c(3,5,8,9)], train)
+dim(train_tidy)
+sum(sapply(train_tidy, class) == "logical")
+sum(sapply(train_tidy, class) == "character")
+sum(sapply(train_tidy, class) == "factor")
+sum(sapply(train_tidy, class) == "integer")
+
+
+```
+
+After parse the JSON format and tidy the data, we get a data set with 55 variales. 48 of them are character variables, 4 are numerical variables and 3 are boolean variables.
+
+## 3.2 Data exploration
+
+### 3.2.1 General introduction
+
+```{r}
+# Distinct values of each variable
+distinct_value <- sapply(train_tidy,n_distinct)
+distinct_value <- as.data.frame(distinct_value)
+names(distinct_value) <-"num_distinct_values" 
+distinct_value <- distinct_value %>%
+  rownames_to_column("colnames") %>%
+  mutate(colnames = reorder(colnames, -num_distinct_values))
+
+constant <- filter(distinct_value,num_distinct_values == 1)
+head(constant)
+```
+
+There are 19 variables with constant value, which have no contribution to model we will build later. We remove those columns.
+
+```{r}
+del <- constant$colnames
+del <- as.character(del)
+train_tidy_s <- select(train_tidy,-del)
+```
+
+
+### 3.2.2 Missing value
+
+Explore the distribution of the missing value of each variable in the data set.
+
+```{r}
+# Set the explanatory variable to x, response variable to y
+x <- select(train_tidy_s, -transactionRevenue)
+y <- train_tidy_s$transactionRevenue %>%
+  as.numeric()
+# Format transformation
+x$channelGrouping <- as.character(x$channelGrouping)
+x$sessionId <- as.character(x$sessionId)
+# Change all kinds of missing values into NA.
+x <- mutate_all(x,function(a) ifelse(a %in% 
+                                       c("not available in demo dataset",
+                                         "(not provided)",
+                                         "(not set)",
+                                         "<NA>",
+                                         "unknown.unknown", 
+                                         "(none)"), NA, a))
+
+missing_rate <- sapply(x, function(a) mean(is.na(a)))
+missing_rate%>%
+  as.data.frame()%>%
+  rename(missing_rate = '.')%>%
+  rownames_to_column("colnames")%>%
+  mutate(colnames = reorder(colnames,missing_rate))%>%
+  ggplot()+
+  geom_col(aes(colnames, missing_rate))+
+  coord_flip()
+
+```
+
+We find there are 15 variables has more than 50% missing value rate. Further more we find the column "campaignCode" only have one none-NA value, which is useless in the later modeling. Thus we remove this column.
+
+```{r}
+sum(missing_rate>0.5)
+```
+
+
+```{r}
+missing_rate["campaignCode"]
+sum(!is.na(x$campaignCode))
+unique(x$campaignCode)
+x <- select(x,-campaignCode)
+```
+
+Transform some variables to their natural representations.
+```{r}
+# Transformation of some columns
+x <- x%>%
+  mutate(date = ymd(date), visitId = as.character(visitId),
+         hits = as.integer(hits),pageviews = as.integer(pageviews),
+         bounces = as.integer(bounces),
+         newVisits = as.integer(newVisits))
+```
+
+
+For the response variable, it has relatively high missing value rate-98%.
+
+```{r}
+summary(y)
+mean(is.na(y))
+```
+
+Intuitively, such high missing value rate may due to high proportion of customers who usually need multiple visits to complete the online purchase. Based on that assumption, we could repalce thoes NAs with 0.
+
+```{r}
+y[is.na(y)] <- 0
+summary(y)
+```
+
+
+### 3.2.3 distribution of response variable
+
+```{r}
+# The distribution of revenue
+y %>% as.data.frame()%>%
+  rename(revenue = '.')%>%
+  ggplot(aes(1:length(revenue), revenue))+
+    geom_point(alpha = 0.5)
+# The distribution of log revenue
+y %>% as.data.frame()%>%
+  rename(revenue = '.')%>%
+  ggplot()+
+    geom_histogram(aes(log(revenue)))
+  
+```
+
+
+As mentioned above, a large part of the revenue is 0. Since our target is to predict log of revenue, we also plot the distribution of log(revenue) which is a little bit right skew.
+
+### 3.2.4 Channel related features
+
+Visits with different channelGrouping, devices and browser.
+
+```{r}
+ggplot(data=x,aes(reorder(channelGrouping,rep(1,length(channelGrouping)),sum)))+geom_bar()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+ labs(x="channelGrouping", y = "visits")
+
+ggplot(data=x,aes(reorder(deviceCategory,rep(1,length(deviceCategory)),sum)))+geom_bar()+
+ labs(x="deviceCategory", y = "visits")
+
+x %>%
+  count(browser, sort=TRUE) %>% 
+  top_n(5) %>%
+  mutate(browser=reorder(browser, n)) %>%
+  ggplot(aes(x=browser, y=n)) + 
+  geom_col()+ labs(y = "visits")
+```
+
+Revenue with different channelGrouping, devices and browser.
+
+```{r}
+data_w %>%
+  group_by(channelGrouping) %>%
+  summarize(total_revenue = sum(y)) %>%
+  mutate(channelGrouping=reorder(channelGrouping, total_revenue)) %>%
+  ggplot(aes(channelGrouping, log(total_revenue))) +
+  geom_bar(stat = "identity")
+
+data_w %>%
+  group_by(deviceCategory) %>%
+  summarize(total_revenue = sum(y)) %>%
+  mutate(deviceCategory=reorder(deviceCategory, total_revenue)) %>%
+  ggplot(aes(deviceCategory, log(total_revenue))) +
+  geom_bar(stat = "identity")
+
+data_w %>%
+  group_by(browser) %>%
+  summarize(total_revenue = sum(y)) %>%
+  top_n(5) %>%
+  mutate(browser=reorder(browser, log(total_revenue))) %>%
+  ggplot(aes(x=browser, y=total_revenue)) +
+  geom_bar(stat = "identity")
+```
+
+
+### 3.2.5 Geographical features
+
+* Geographical distribution of visits(country/city)
+
+United State is the country that most visits come from.
+
+(map)
+
+```{r}
+ggplot(data=x,aes(reorder(subContinent,rep(1,length(subContinent)),sum)))+geom_bar()+theme(axis.text.x = element_text(angle = 45, hjust = 1))+ labs(x="subContinent", y = "visits")
+```
+
+```{r}
+b <- map_data("world")
+x2 <- x%>%
+  dplyr::count(country, sort = TRUE)
+
+x2$country[x2$country=="United States"] <- "USA"
+x2$country[x2$country=="United Kingdom"] <- "UK"
+
+x_country <- b %>%
+  left_join(., x2, by=c("region"="country"))
+filter(x_country,region == "United State")
+
+ggplot(x_country,mapping=aes(x=long,y=lat,group=group,fill=n)) +
+geom_polygon(colour="white") +
+  scale_fill_gradient(low = 'orange', high = 'red',name = "Visits") +
+  labs(title ="Visits in different countries") +  
+  theme(axis.title = element_blank(), axis.text = element_blank(), 
+        axis.ticks = element_blank(), panel.grid = element_blank())
+```
+
+
+```{r}
+x_city <- data.frame(city=c("Mountain View","New York","San Francisco","Sunnyvale","San Jose","Los Angeles","Chicago","Seattle","Austin","Santa Clara","Salem","Cambridge","Ann Arbor"), lat=c(37.4001,40.6943,37.7561,37.3846,37.3020,34.1140,41.8373,47.6217,30.3038,37.3646,42.5130,42.3758,37.4001), lng=c(-122.0796,-73.9249,-122.4429,-122.0261,-121.8488,-118.4068,-87.6861,-122.3238,-97.7545,-121.9679,-70.9021,-71.1184,-122.0796),n=c(40659,26228,20206,13008,10210,8637,7430,5002,3782,3162,2224,1582,40659))
+
+x_y %>%
+  filter(!is.na(city),country == "United States")%>%
+  dplyr::count(city) %>%
+  top_n(10) %>%
+  left_join(.,x_city)%>%
+  mutate(city=reorder(city, n)) %>%
+  ggplot(aes(x=lng,y=lat,size=n, color=n)) +
+  borders("state") +
+  geom_point()+
+  labs(title ="Top 10 Cities with the most visits") +  
+  theme(axis.title = element_blank(), axis.text = element_blank(), 
+        axis.ticks = element_blank(), panel.grid = element_blank())
+
+```
+
+* Geographical distribution of pageview and hits
+
+```{r}
+x %>%
+  group_by(continent) %>% 
+  mutate(pageviews = as.numeric(pageviews)) %>% 
+  filter(pageviews != "NA", continent != "NA") %>% 
+  summarise(total = sum(pageviews)) %>% 
+  ggplot(aes(x = reorder(continent, -total), y = total)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Page Views")
+
+x %>%
+  group_by(continent) %>% 
+  mutate(hits = as.numeric(hits)) %>% 
+  filter(hits != "NA", continent != "NA") %>% 
+  summarise(total = sum(hits)) %>% 
+  ggplot(aes(x = reorder(continent, -total), y = total)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Hits")
+
+# Average pageviews and hits in continent
+x %>%
+  group_by(continent) %>% 
+  mutate(pageviews = as.numeric(pageviews)) %>% 
+  filter(pageviews != "NA", continent != "NA") %>% 
+  summarise(average = mean(pageviews)) %>% 
+  ggplot(aes(x = reorder(continent, -average), y = average)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Page Views")
+
+x %>%
+  group_by(continent) %>% 
+  mutate(hits = as.numeric(hits)) %>% 
+  filter(hits != "NA", continent != "NA") %>% 
+  summarise(average = mean(hits)) %>% 
+  ggplot(aes(x = reorder(continent, -average), y = average)) +
+  geom_bar(stat = "identity") +
+  xlab("Continent") +
+  ylab("Number of Hits")
+```
+
+* Geographical distribution of the browser and device
+```{r}
+x %>%
+  group_by(continent, browser) %>% 
+  summarise(total = n()) %>% 
+  top_n(5) %>% 
+  ungroup() %>% 
+  arrange(continent, desc(total)) %>%
+  filter(continent != "NA") %>% 
+  ggplot(aes(x = reorder(browser,-total), y = total)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~continent) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  xlab("Continent") +
+  ylab("Number of browser")
+
+x %>%
+  group_by(continent, deviceCategory) %>% 
+  summarise(total = n()) %>% 
+  arrange(desc(total)) %>% 
+  filter(continent != "NA") %>% 
+  ggplot(aes(x = reorder(deviceCategory, -total), y = total)) + 
+  geom_bar(stat = "identity") + 
+  facet_grid(~continent) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  xlab("Continent") +
+  ylab("Number of Device Category")
+```
+
+* Geographical distribution of Gstores sales.
+
+The US users yield most total revenue and users in New York contribute the most.
+```{r}
+data_w <- data.frame(x,y)
+
+data_w %>%
+  group_by(country) %>%
+  dplyr::summarize(total_revenue = sum(y)) %>%
+  dplyr::mutate(country=reorder(country, total_revenue)) %>%
+  top_n(5)%>%
+  ungroup%>%
+  ggplot(aes(x = country,y = log(total_revenue), fill = log(total_revenue)>25)) +
+  geom_col()+
+  guides(fill=FALSE)
+
+x_city <- data.frame(city=c("Mountain View","New York","San Francisco","Sunnyvale","San Jose","Los Angeles","Chicago","Seattle","Austin","Santa Clara","Salem","Cambridge","Ann Arbor"), lat=c(37.4001,40.6943,37.7561,37.3846,37.3020,34.1140,41.8373,47.6217,30.3038,37.3646,42.5130,42.3758,37.4001), lng=c(-122.0796,-73.9249,-122.4429,-122.0261,-121.8488,-118.4068,-87.6861,-122.3238,-97.7545,-121.9679,-70.9021,-71.1184,-122.0796),n=c(40659,26228,20206,13008,10210,8637,7430,5002,3782,3162,2224,1582,40659))
+
+data_w %>%
+  filter(!is.na(city),country == "United States")%>%
+  group_by(city) %>%
+  dplyr::summarize(total_revenue = sum(y)) %>%
+  top_n(10) %>%
+  left_join(.,x_city)%>%
+  mutate(city=reorder(city, total_revenue)) %>%
+  ggplot(aes(x=lng,y=lat,size=log(total_revenue), color=log(total_revenue))) +
+  borders("state") +
+  geom_point()+
+  labs(title ="Top 10 Cities with the most reveune") +  
+  theme(axis.title = element_blank(), axis.text = element_blank(), 
+        axis.ticks = element_blank(), panel.grid = element_blank())+
+  scale_size_continuous(name = "Total Revenue")+
+  scale_color_continuous(name = "Total Revenue")
+
+
+```
+
+
+### 3.2.6 Time features
+
+* The trends of user transactions and visits along time
+
+```{r}
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  group_by(date) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = date, y = visits)) + 
+  geom_line() +
+  geom_smooth() 
+  
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  group_by(date) %>% 
+  dplyr::summarize(revenue = mean(y)) %>% 
+  ggplot(aes(x = date, y = log(revenue))) + 
+  geom_line() +
+  stat_smooth() 
+
+
+```
+
+* Visits in different device over time
+
+```{r}
+data_w %>% 
+  filter(deviceCategory == "tablet")%>%
+  mutate(date = ymd(date))%>%
+  group_by(date) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = date, y = visits)) + 
+  geom_line()+ geom_smooth()
+unique(data_w$deviceCategory)
+
+data_w %>% 
+  filter(deviceCategory == "mobile")%>%
+  mutate(date = ymd(date))%>%
+  group_by(date) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = date, y = visits)) + 
+  geom_line()+ geom_smooth()
+unique(data_w$deviceCategory)
+
+data_w %>% 
+  filter(deviceCategory == "desktop")%>%
+  mutate(date = ymd(date))%>%
+  group_by(date) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = date, y = visits)) + 
+  geom_line()+ geom_smooth()
+unique(data_w$deviceCategory)
+```
+
+
+
+From the two plots above, we can see the number of visits keep growing from begining to a little bit after Jan. 2017. While the mean revenue seems has the opposite pattern during the same period followed by a slight increasing after Jan.2017.This behavior may indicate the number of visits has a lagged impact on the mean revenue.
+
+There is an obvious pattern along the time which we like to explore a little deeper.
+
+* Any visit peak? weekly/monthly
+
+```{r}
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  mutate(wday =wday(date, label = TRUE))%>%
+  group_by(wday) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = wday, y = visits, fill = visits < 110000)) + 
+  geom_col() 
+
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  mutate(wday =wday(date, label = TRUE))%>%
+  group_by(wday) %>% 
+  dplyr::summarize(revenue = mean(y)) %>% 
+  ggplot(aes(x = wday, y = log(revenue), fill = revenue< 855696)) + 
+  geom_col() 
+
+```
+
+Suprisely, the visit and revenue to Gstore frequently happen during the week days.(company behavior?)
+
+
+```{r}
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  mutate(mday = mday(date))%>%
+  group_by(mday) %>% 
+  dplyr::summarize(visits = n()) %>% 
+  ggplot(aes(x = mday, y = visits)) + 
+  geom_line() +
+  geom_smooth()
+
+data_w %>% 
+  mutate(date = ymd(date))%>%
+  mutate(mday = mday(date))%>%
+  group_by(mday) %>% 
+  dplyr::summarize(revenue = mean(y)) %>% 
+  ggplot(aes(x = mday, y = log(revenue)))+ 
+  geom_line() +
+  geom_smooth()
+```
+
+The number of visits reach its highest value at the begining of a month and fall down around 10st day of a month as well as the end of a month.
+
+The revenue seems quite high between 10st and 20st day of a month and grow again at end of the month.
+
+### User related features
+
+* Average hits, pageview, visits of users(revenue > 0)
+
+```{r}
+data_w %>%
+  mutate(hits = as.numeric(hits))%>%
+  group_by(fullVisitorId)%>%
+  dplyr::summarise(mean_hits = mean(hits),revenue = sum(y))%>%
+  ggplot()+
+  geom_point(aes(mean_hits,log(revenue), color = revenue>0), alpha = 0.1)
+
+```
+
+There is a abvious different between total revenue larger than and equal to 0, which indicates a efficient feature for the classification we conduct next step.
+
+```{r}
+data_w %>%
+  mutate(pageviews = as.numeric(pageviews))%>%
+  group_by(fullVisitorId)%>%
+  dplyr::summarise(mean_pageviews = mean(pageviews),revenue = sum(y))%>%
+  ggplot(aes(mean_pageviews,log(revenue), color = revenue>0))+geom_point(alpha = 0.1)
+  
+```
+
+Similar results as before.
+
+
+```{r}
+data_w %>%
+  mutate(pageviews = as.numeric(pageviews))%>%
+  group_by(fullVisitorId)%>%
+  dplyr::summarise(visits = n(),revenue = sum(y))%>%
+  ggplot(aes(visits,log(revenue), color = revenue>0))+geom_point(alpha = 0.1)
+```
+
+* The visit times/hits/pageview vs. revenue
+
+```{r}
+data_w %>%
+  group_by(fullVisitorId) %>%
+  dplyr::summarise(pageview = sum(as.numeric(pageviews)), revenue = sum(y)) %>%
+  ggplot(aes(pageview, log(revenue))) +
+  geom_point(alpha = 0.1)
+```
+
+
+```{r}
+data_w %>%
+  group_by(fullVisitorId) %>%
+  dplyr::summarise(hits = sum(as.numeric(hits)), revenue = sum(y)) %>%
+  ggplot(aes(hits, log(revenue))) +
+  geom_point(alpha = 0.1)
+```
+
+
+
+
